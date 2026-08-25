@@ -327,6 +327,7 @@ async def open_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("new_ticket", None)
     context.user_data["new_ticket"] = {}
+    context.user_data["ticket_step"] = "type"
 
     await query.message.reply_text(
         "🎫 فتح تذكرة دعم\n\n"
@@ -342,6 +343,7 @@ async def choose_ticket_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if query.data == "cancel_ticket":
         context.user_data.pop("new_ticket", None)
+        context.user_data.pop("ticket_step", None)
         await query.message.reply_text(
             "تم إلغاء فتح التذكرة.",
             reply_markup=InlineKeyboardMarkup([
@@ -355,6 +357,7 @@ async def choose_ticket_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return TICKET_TYPE
 
     context.user_data["new_ticket"]["ticket_type"] = ticket_type
+    context.user_data["ticket_step"] = "training_number"
 
     await query.message.reply_text(
         f"تم اختيار: {TICKET_TYPES[ticket_type]}\n\n"
@@ -425,6 +428,7 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cancel_ticket":
         context.user_data.pop("new_ticket", None)
+        context.user_data.pop("ticket_step", None)
         await query.message.reply_text(
             "تم إلغاء التذكرة.",
             reply_markup=InlineKeyboardMarkup([
@@ -452,6 +456,7 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     context.user_data.pop("new_ticket", None)
+    context.user_data.pop("ticket_step", None)
 
     await query.message.reply_text(
         "✅ تم إرسال التذكرة بنجاح\n\n"
@@ -470,6 +475,8 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("new_ticket", None)
+    context.user_data.pop("ticket_step", None)
+    context.user_data.pop("track_step", None)
     await update.message.reply_text("تم الإلغاء.", reply_markup=main_keyboard())
     return ConversationHandler.END
 
@@ -480,6 +487,7 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def track_ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    context.user_data["track_step"] = True
     await query.message.reply_text(
         "📋 متابعة تذكرة\n\n"
         "أرسل رقم التذكرة، مثال:\nET-1001"
@@ -500,6 +508,7 @@ async def track_ticket_receive(update: Update, context: ContextTypes.DEFAULT_TYP
 
     # حماية خصوصية الطالب: لا تظهر التذكرة إلا لصاحبها أو للمشرف
     if ticket["telegram_user_id"] != update.effective_user.id and not is_admin(update.effective_user.id):
+        context.user_data.pop("track_step", None)
         await update.message.reply_text("❌ هذه التذكرة غير مرتبطة بحسابك.")
         return ConversationHandler.END
 
@@ -518,6 +527,7 @@ async def track_ticket_receive(update: Update, context: ContextTypes.DEFAULT_TYP
         f"{public_updates}"
     )
 
+    context.user_data.pop("track_step", None)
     await update.message.reply_text(text, reply_markup=main_keyboard())
     return ConversationHandler.END
 
@@ -812,9 +822,115 @@ async def ticket_action_buttons(update: Update, context: ContextTypes.DEFAULT_TY
 async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
+
     message = update.message.text.strip()
     user_id = update.effective_user.id
 
+    # ==========================================
+    # أولاً: مسار فتح التذكرة — له الأولوية
+    # ==========================================
+    ticket_step = context.user_data.get("ticket_step")
+    new_ticket = context.user_data.get("new_ticket")
+
+    if ticket_step and new_ticket is not None:
+        if ticket_step == "training_number":
+            if len(message) < 4:
+                await update.message.reply_text("الرقم التدريبي غير واضح. أرسله مرة أخرى:")
+                return
+
+            new_ticket["training_number"] = message
+            context.user_data["ticket_step"] = "full_name"
+            await update.message.reply_text("ممتاز. الآن أرسل الاسم الثلاثي:")
+            return
+
+        if ticket_step == "full_name":
+            if len(message.split()) < 2:
+                await update.message.reply_text("الاسم غير واضح. أرسل الاسم الكامل مرة أخرى:")
+                return
+
+            new_ticket["full_name"] = message
+            context.user_data["ticket_step"] = "description"
+            await update.message.reply_text(
+                "📝 اكتب وصف المشكلة بالتفصيل.\\n\\n"
+                "مثال: لا يظهر لي المقرر في البلاك بورد منذ صباح اليوم."
+            )
+            return
+
+        if ticket_step == "description":
+            if len(message) < 8:
+                await update.message.reply_text("اكتب وصفاً أوضح للمشكلة:")
+                return
+
+            new_ticket["description"] = message
+            context.user_data["ticket_step"] = "confirm"
+
+            summary = (
+                "📋 راجع بيانات التذكرة:\\n\\n"
+                f"النوع: {TICKET_TYPES[new_ticket['ticket_type']]}\\n"
+                f"الرقم التدريبي: {new_ticket['training_number']}\\n"
+                f"الاسم: {new_ticket['full_name']}\\n\\n"
+                f"وصف المشكلة:\\n{new_ticket['description']}\\n\\n"
+                "هل تريد إرسال التذكرة؟"
+            )
+            await update.message.reply_text(
+                summary,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ إرسال التذكرة", callback_data="confirm_ticket")],
+                    [InlineKeyboardButton("❌ إلغاء", callback_data="cancel_ticket")],
+                ]),
+            )
+            return
+
+        if ticket_step == "confirm":
+            await update.message.reply_text(
+                "استخدم زر ✅ إرسال التذكرة أو ❌ إلغاء الموجود في الرسالة السابقة."
+            )
+            return
+
+    # ==========================================
+    # ثانياً: متابعة تذكرة
+    # ==========================================
+    if context.user_data.get("track_step"):
+        ticket_code = message.upper()
+        ticket = get_ticket(ticket_code)
+
+        if not ticket:
+            await update.message.reply_text(
+                "❌ لم أجد تذكرة بهذا الرقم.\\n"
+                "تأكد من الرقم وأرسله مرة أخرى، مثال: ET-1001"
+            )
+            return
+
+        if ticket["telegram_user_id"] != user_id and not is_admin(user_id):
+            context.user_data.pop("track_step", None)
+            await update.message.reply_text("❌ هذه التذكرة غير مرتبطة بحسابك.")
+            return
+
+        notes = get_public_notes(ticket_code)
+        public_updates = ""
+        if notes:
+            public_updates = "\\n\\n📨 آخر التحديثات:\\n" + "\\n".join(
+                f"• {row['note']}" for row in notes[-5:]
+            )
+
+        context.user_data.pop("track_step", None)
+        await update.message.reply_text(
+            (
+                f"🎫 التذكرة: {ticket['ticket_code']}\\n"
+                f"الحالة: {STATUS_LABELS.get(ticket['status'], ticket['status'])}\\n"
+                f"النوع: {TICKET_TYPES.get(ticket['ticket_type'], ticket['ticket_type'])}\\n"
+                f"آخر تحديث: {ticket['updated_at']}"
+                f"{public_updates}"
+            ),
+            reply_markup=student_ticket_keyboard(ticket_code, ticket["status"])
+            if ticket["telegram_user_id"] == user_id
+            else admin_ticket_keyboard(ticket_code),
+        )
+        return
+
+    # ==========================================
+    # ثالثاً: ملاحظة داخلية للمشرف
+    # ==========================================
     note_ticket = context.user_data.get("admin_note_ticket")
     if note_ticket and is_admin(user_id):
         add_note(note_ticket, message, is_public=False)
@@ -825,6 +941,9 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
+    # ==========================================
+    # رابعاً: رسالة المشرف للطالب
+    # ==========================================
     admin_ticket = context.user_data.get("admin_chat_ticket")
     if admin_ticket and is_admin(user_id):
         ticket = get_ticket(admin_ticket)
@@ -832,22 +951,26 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
             context.user_data.pop("admin_chat_ticket", None)
             await update.message.reply_text("❌ لم أجد التذكرة.")
             return
+
         try:
             await context.bot.send_message(
                 chat_id=ticket["telegram_user_id"],
-                text=f"💬 رد الدعم على التذكرة {admin_ticket}\n\n{message}",
+                text=f"💬 رد الدعم على التذكرة {admin_ticket}\\n\\n{message}",
                 reply_markup=student_ticket_keyboard(admin_ticket, ticket["status"]),
             )
             add_chat_message(admin_ticket, "admin", message)
             await update.message.reply_text(
-                f"✅ تم إرسال رسالتك للطالب — {admin_ticket}\n"
+                f"✅ تم إرسال رسالتك للطالب — {admin_ticket}\\n"
                 "اكتب رسالة أخرى أو /done للخروج.",
                 reply_markup=admin_ticket_keyboard(admin_ticket),
             )
         except Exception as exc:
-            await update.message.reply_text(f"❌ تعذر إرسال الرسالة للطالب:\n{exc}")
+            await update.message.reply_text(f"❌ تعذر إرسال الرسالة للطالب:\\n{exc}")
         return
 
+    # ==========================================
+    # خامساً: رسالة الطالب للدعم
+    # ==========================================
     student_ticket = context.user_data.get("student_chat_ticket")
     if student_ticket:
         ticket = get_ticket(student_ticket)
@@ -855,28 +978,30 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
             context.user_data.pop("student_chat_ticket", None)
             await update.message.reply_text("❌ تعذر العثور على التذكرة.")
             return
+
         if not ADMIN_USER_ID:
             await update.message.reply_text("❌ لم يتم إعداد حساب مسؤول الدعم.")
             return
+
         try:
             await context.bot.send_message(
                 chat_id=int(ADMIN_USER_ID),
                 text=(
-                    f"💬 رسالة من الطالب — {student_ticket}\n\n"
-                    f"الاسم: {ticket['full_name']}\n"
-                    f"الرقم التدريبي: {ticket['training_number']}\n\n"
+                    f"💬 رسالة من الطالب — {student_ticket}\\n\\n"
+                    f"الاسم: {ticket['full_name']}\\n"
+                    f"الرقم التدريبي: {ticket['training_number']}\\n\\n"
                     f"{message}"
                 ),
                 reply_markup=admin_ticket_keyboard(student_ticket),
             )
             add_chat_message(student_ticket, "student", message)
             await update.message.reply_text(
-                f"✅ تم إرسال رسالتك للدعم — {student_ticket}\n"
+                f"✅ تم إرسال رسالتك للدعم — {student_ticket}\\n"
                 "اكتب رسالة أخرى أو /done للخروج.",
                 reply_markup=student_ticket_keyboard(student_ticket, ticket["status"]),
             )
         except Exception as exc:
-            await update.message.reply_text(f"❌ تعذر إرسال رسالتك للدعم:\n{exc}")
+            await update.message.reply_text(f"❌ تعذر إرسال رسالتك للدعم:\\n{exc}")
         return
 
     await update.message.reply_text("اختر الخدمة من القائمة:", reply_markup=main_keyboard())
@@ -886,6 +1011,9 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("admin_chat_ticket", None)
     context.user_data.pop("student_chat_ticket", None)
     context.user_data.pop("admin_note_ticket", None)
+    context.user_data.pop("ticket_step", None)
+    context.user_data.pop("track_step", None)
+    context.user_data.pop("new_ticket", None)
     await update.message.reply_text("✅ تم إنهاء وضع المحادثة.", reply_markup=main_keyboard())
 
 
@@ -900,46 +1028,6 @@ def main():
 
     app = Application.builder().token(TOKEN).build()
 
-    ticket_conversation = ConversationHandler(
-        entry_points=[CallbackQueryHandler(open_ticket, pattern="^open_ticket$")],
-        states={
-            TICKET_TYPE: [
-                CallbackQueryHandler(
-                    choose_ticket_type,
-                    pattern="^(type_blackboard|type_rayat|type_course|type_other|cancel_ticket)$",
-                )
-            ],
-            TRAINING_NUMBER: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_training_number)
-            ],
-            FULL_NAME: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_full_name)
-            ],
-            DESCRIPTION: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, receive_description)
-            ],
-            CONFIRM: [
-                CallbackQueryHandler(
-                    confirm_ticket,
-                    pattern="^(confirm_ticket|cancel_ticket)$",
-                )
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_conversation)],
-        allow_reentry=True,
-    )
-
-    track_conversation = ConversationHandler(
-        entry_points=[CallbackQueryHandler(track_ticket_start, pattern="^track_ticket$")],
-        states={
-            TRACK_TICKET: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, track_ticket_receive)
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel_conversation)],
-        allow_reentry=True,
-    )
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("myid", myid))
@@ -951,9 +1039,21 @@ def main():
     app.add_handler(CommandHandler("reply", reply_command))
     app.add_handler(CommandHandler("status", status_command))
 
-    # المحادثات
-    app.add_handler(ticket_conversation)
-    app.add_handler(track_conversation)
+    # مسارات فتح ومتابعة التذاكر
+    app.add_handler(CallbackQueryHandler(open_ticket, pattern="^open_ticket$"))
+    app.add_handler(
+        CallbackQueryHandler(
+            choose_ticket_type,
+            pattern="^(type_blackboard|type_rayat|type_course|type_other|cancel_ticket)$",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            confirm_ticket,
+            pattern="^(confirm_ticket|cancel_ticket)$",
+        )
+    )
+    app.add_handler(CallbackQueryHandler(track_ticket_start, pattern="^track_ticket$"))
 
     # أزرار إدارة التذكرة والمحادثة
     app.add_handler(
