@@ -191,6 +191,7 @@ def admin_ticket_keyboard(ticket_code):
          InlineKeyboardButton("⏳ بانتظار الطالب", callback_data=f"admin_status:waiting_student:{ticket_code}")],
         [InlineKeyboardButton("✅ تم الحل", callback_data=f"admin_status:resolved:{ticket_code}"),
          InlineKeyboardButton("🔒 إغلاق", callback_data=f"admin_status:closed:{ticket_code}")],
+        [InlineKeyboardButton("📊 إحصائيات التذاكر", callback_data="admin_stats")],
     ])
 
 
@@ -202,6 +203,64 @@ def student_ticket_keyboard(ticket_code, status):
         rows.append([InlineKeyboardButton("🔄 إعادة فتح التذكرة", callback_data=f"student_reopen:{ticket_code}")])
     rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="back_home")])
     return InlineKeyboardMarkup(rows)
+
+def get_ticket_stats():
+    with get_db() as conn:
+        total = conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
+
+        status_counts = {
+            status: conn.execute(
+                "SELECT COUNT(*) FROM tickets WHERE status = ?",
+                (status,),
+            ).fetchone()[0]
+            for status in STATUS_LABELS
+        }
+
+        type_counts = {
+            ticket_type: conn.execute(
+                "SELECT COUNT(*) FROM tickets WHERE ticket_type = ?",
+                (ticket_type,),
+            ).fetchone()[0]
+            for ticket_type in TICKET_TYPES
+        }
+
+        today = conn.execute(
+            """
+            SELECT COUNT(*) FROM tickets
+            WHERE date(created_at) = date('now', 'localtime')
+            """
+        ).fetchone()[0]
+
+        week = conn.execute(
+            """
+            SELECT COUNT(*) FROM tickets
+            WHERE datetime(created_at) >= datetime('now', '-7 days', 'localtime')
+            """
+        ).fetchone()[0]
+
+        month = conn.execute(
+            """
+            SELECT COUNT(*) FROM tickets
+            WHERE strftime('%Y-%m', created_at) = strftime('%Y-%m', 'now', 'localtime')
+            """
+        ).fetchone()[0]
+
+        return {
+            "total": total,
+            "today": today,
+            "week": week,
+            "month": month,
+            "status_counts": status_counts,
+            "type_counts": type_counts,
+        }
+
+
+def admin_stats_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 تحديث الإحصائيات", callback_data="admin_stats")],
+        [InlineKeyboardButton("📂 حسب نوع المشكلة", callback_data="admin_stats_types")],
+        [InlineKeyboardButton("🎫 آخر 10 تذاكر", callback_data="admin_latest_tickets")],
+    ])
 
 def latest_tickets(limit=10):
     with get_db() as conn:
@@ -254,9 +313,8 @@ async def notify_admin(context: ContextTypes.DEFAULT_TYPE, ticket_code: str):
         f"الرقم التدريبي: {ticket['training_number']}\n"
         f"الحالة: {STATUS_LABELS.get(ticket['status'], ticket['status'])}\n\n"
         f"الوصف:\n{ticket['description']}\n\n"
-        f"للملاحظات الداخلية:\n/note {ticket['ticket_code']} الملاحظة\n\n"
-        f"للرد على الطالب:\n/reply {ticket['ticket_code']} الرد\n\n"
-        f"لتغيير الحالة:\n/status {ticket['ticket_code']} in_progress"
+        f"📌 تم توجيه الطالب لإرسال رقم التذكرة وتفاصيلها لك بالخاص على @{CONTACT_USERNAME}.\n\n"
+        f"يمكنك أيضاً إدارة التذكرة من الأزرار بالأسفل."
     )
 
     try:
@@ -459,11 +517,14 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("ticket_step", None)
 
     await query.message.reply_text(
-        "✅ تم إرسال التذكرة بنجاح\n\n"
+        "✅ تم فتح التذكرة بنجاح\n\n"
         f"رقم التذكرة: {ticket_code}\n"
         "الحالة: 🆕 جديدة\n\n"
-        "احتفظ برقم التذكرة لمتابعتها لاحقاً.",
+        "📌 لضمان سرعة معالجة التذكرة:\n"
+        f"نرجو إرسال رقم التذكرة وتفاصيل المشكلة بالخاص على تيليجرام إلى @{CONTACT_USERNAME}.\n\n"
+        "سيتم معالجة الطلب ومتابعته معك بالخاص.",
         reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("👤 التواصل بالخاص", url=f"https://t.me/{CONTACT_USERNAME}")],
             [InlineKeyboardButton("📋 متابعة التذكرة", callback_data="track_ticket")],
             [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="back_home")],
         ]),
@@ -717,6 +778,108 @@ async def ticket_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# إحصائيات المشرف
+# =========================
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("هذا الأمر مخصص للمشرف.")
+        return
+
+    stats = get_ticket_stats()
+    s = stats["status_counts"]
+
+    text = (
+        "📊 إحصائيات التذاكر\n\n"
+        f"إجمالي التذاكر: {stats['total']}\n"
+        f"اليوم: {stats['today']}\n"
+        f"آخر 7 أيام: {stats['week']}\n"
+        f"هذا الشهر: {stats['month']}\n\n"
+        f"🆕 جديدة: {s.get('new', 0)}\n"
+        f"🛠 تحت الإجراء: {s.get('in_progress', 0)}\n"
+        f"⏳ بانتظار الطالب: {s.get('waiting_student', 0)}\n"
+        f"✅ تم الحل: {s.get('resolved', 0)}\n"
+        f"🔒 مغلقة: {s.get('closed', 0)}"
+    )
+
+    await update.message.reply_text(text, reply_markup=admin_stats_keyboard())
+
+
+async def admin_stats_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if not is_admin(query.from_user.id):
+        await query.message.reply_text("هذا الخيار مخصص للمشرف.")
+        return
+
+    if query.data == "admin_stats":
+        stats = get_ticket_stats()
+        s = stats["status_counts"]
+
+        text = (
+            "📊 إحصائيات التذاكر\n\n"
+            f"إجمالي التذاكر: {stats['total']}\n"
+            f"اليوم: {stats['today']}\n"
+            f"آخر 7 أيام: {stats['week']}\n"
+            f"هذا الشهر: {stats['month']}\n\n"
+            f"🆕 جديدة: {s.get('new', 0)}\n"
+            f"🛠 تحت الإجراء: {s.get('in_progress', 0)}\n"
+            f"⏳ بانتظار الطالب: {s.get('waiting_student', 0)}\n"
+            f"✅ تم الحل: {s.get('resolved', 0)}\n"
+            f"🔒 مغلقة: {s.get('closed', 0)}"
+        )
+
+        await query.message.reply_text(text, reply_markup=admin_stats_keyboard())
+        return
+
+    if query.data == "admin_stats_types":
+        stats = get_ticket_stats()
+        t = stats["type_counts"]
+
+        text = (
+            "📂 التذاكر حسب نوع المشكلة\n\n"
+            f"🖥️ البلاك بورد: {t.get('blackboard', 0)}\n"
+            f"🔐 رايات: {t.get('rayat', 0)}\n"
+            f"📚 المقرر/المحتوى: {t.get('course', 0)}\n"
+            f"📝 أخرى: {t.get('other', 0)}"
+        )
+
+        await query.message.reply_text(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 العودة للإحصائيات", callback_data="admin_stats")]
+            ]),
+        )
+        return
+
+    if query.data == "admin_latest_tickets":
+        tickets = latest_tickets(10)
+
+        if not tickets:
+            await query.message.reply_text(
+                "لا توجد تذاكر حتى الآن.",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📊 العودة للإحصائيات", callback_data="admin_stats")]
+                ]),
+            )
+            return
+
+        lines = ["🎫 آخر 10 تذاكر\n"]
+        for ticket in tickets:
+            lines.append(
+                f"{ticket['ticket_code']} | "
+                f"{STATUS_LABELS.get(ticket['status'], ticket['status'])}\n"
+                f"{ticket['full_name']} - {ticket['training_number']}"
+            )
+
+        await query.message.reply_text(
+            "\n\n".join(lines),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 العودة للإحصائيات", callback_data="admin_stats")]
+            ]),
+        )
+
+# =========================
 # المحادثة داخل التذكرة
 # =========================
 async def ticket_action_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -851,7 +1014,7 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
             new_ticket["full_name"] = message
             context.user_data["ticket_step"] = "description"
             await update.message.reply_text(
-                "📝 اكتب وصف المشكلة بالتفصيل.\\n\\n"
+                "📝 اكتب وصف المشكلة بالتفصيل.\n\n"
                 "مثال: لا يظهر لي المقرر في البلاك بورد منذ صباح اليوم."
             )
             return
@@ -865,11 +1028,11 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
             context.user_data["ticket_step"] = "confirm"
 
             summary = (
-                "📋 راجع بيانات التذكرة:\\n\\n"
-                f"النوع: {TICKET_TYPES[new_ticket['ticket_type']]}\\n"
-                f"الرقم التدريبي: {new_ticket['training_number']}\\n"
-                f"الاسم: {new_ticket['full_name']}\\n\\n"
-                f"وصف المشكلة:\\n{new_ticket['description']}\\n\\n"
+                "📋 راجع بيانات التذكرة:\n\n"
+                f"النوع: {TICKET_TYPES[new_ticket['ticket_type']]}\n"
+                f"الرقم التدريبي: {new_ticket['training_number']}\n"
+                f"الاسم: {new_ticket['full_name']}\n\n"
+                f"وصف المشكلة:\n{new_ticket['description']}\n\n"
                 "هل تريد إرسال التذكرة؟"
             )
             await update.message.reply_text(
@@ -896,7 +1059,7 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
 
         if not ticket:
             await update.message.reply_text(
-                "❌ لم أجد تذكرة بهذا الرقم.\\n"
+                "❌ لم أجد تذكرة بهذا الرقم.\n"
                 "تأكد من الرقم وأرسله مرة أخرى، مثال: ET-1001"
             )
             return
@@ -909,16 +1072,16 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
         notes = get_public_notes(ticket_code)
         public_updates = ""
         if notes:
-            public_updates = "\\n\\n📨 آخر التحديثات:\\n" + "\\n".join(
+            public_updates = "\n\n📨 آخر التحديثات:\n" + "\n".join(
                 f"• {row['note']}" for row in notes[-5:]
             )
 
         context.user_data.pop("track_step", None)
         await update.message.reply_text(
             (
-                f"🎫 التذكرة: {ticket['ticket_code']}\\n"
-                f"الحالة: {STATUS_LABELS.get(ticket['status'], ticket['status'])}\\n"
-                f"النوع: {TICKET_TYPES.get(ticket['ticket_type'], ticket['ticket_type'])}\\n"
+                f"🎫 التذكرة: {ticket['ticket_code']}\n"
+                f"الحالة: {STATUS_LABELS.get(ticket['status'], ticket['status'])}\n"
+                f"النوع: {TICKET_TYPES.get(ticket['ticket_type'], ticket['ticket_type'])}\n"
                 f"آخر تحديث: {ticket['updated_at']}"
                 f"{public_updates}"
             ),
@@ -955,17 +1118,17 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
         try:
             await context.bot.send_message(
                 chat_id=ticket["telegram_user_id"],
-                text=f"💬 رد الدعم على التذكرة {admin_ticket}\\n\\n{message}",
+                text=f"💬 رد الدعم على التذكرة {admin_ticket}\n\n{message}",
                 reply_markup=student_ticket_keyboard(admin_ticket, ticket["status"]),
             )
             add_chat_message(admin_ticket, "admin", message)
             await update.message.reply_text(
-                f"✅ تم إرسال رسالتك للطالب — {admin_ticket}\\n"
+                f"✅ تم إرسال رسالتك للطالب — {admin_ticket}\n"
                 "اكتب رسالة أخرى أو /done للخروج.",
                 reply_markup=admin_ticket_keyboard(admin_ticket),
             )
         except Exception as exc:
-            await update.message.reply_text(f"❌ تعذر إرسال الرسالة للطالب:\\n{exc}")
+            await update.message.reply_text(f"❌ تعذر إرسال الرسالة للطالب:\n{exc}")
         return
 
     # ==========================================
@@ -987,21 +1150,21 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
             await context.bot.send_message(
                 chat_id=int(ADMIN_USER_ID),
                 text=(
-                    f"💬 رسالة من الطالب — {student_ticket}\\n\\n"
-                    f"الاسم: {ticket['full_name']}\\n"
-                    f"الرقم التدريبي: {ticket['training_number']}\\n\\n"
+                    f"💬 رسالة من الطالب — {student_ticket}\n\n"
+                    f"الاسم: {ticket['full_name']}\n"
+                    f"الرقم التدريبي: {ticket['training_number']}\n\n"
                     f"{message}"
                 ),
                 reply_markup=admin_ticket_keyboard(student_ticket),
             )
             add_chat_message(student_ticket, "student", message)
             await update.message.reply_text(
-                f"✅ تم إرسال رسالتك للدعم — {student_ticket}\\n"
+                f"✅ تم إرسال رسالتك للدعم — {student_ticket}\n"
                 "اكتب رسالة أخرى أو /done للخروج.",
                 reply_markup=student_ticket_keyboard(student_ticket, ticket["status"]),
             )
         except Exception as exc:
-            await update.message.reply_text(f"❌ تعذر إرسال رسالتك للدعم:\\n{exc}")
+            await update.message.reply_text(f"❌ تعذر إرسال رسالتك للدعم:\n{exc}")
         return
 
     await update.message.reply_text("اختر الخدمة من القائمة:", reply_markup=main_keyboard())
@@ -1031,6 +1194,7 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CommandHandler("myid", myid))
+    app.add_handler(CommandHandler("stats", stats_command))
 
     # أوامر المشرف
     app.add_handler(CommandHandler("tickets", tickets_command))
@@ -1064,6 +1228,14 @@ def main():
     )
     app.add_handler(CommandHandler("done", done_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_text_router))
+
+    # أزرار إحصائيات المشرف
+    app.add_handler(
+        CallbackQueryHandler(
+            admin_stats_buttons,
+            pattern=r"^(admin_stats|admin_stats_types|admin_latest_tickets)$",
+        )
+    )
 
     # الأزرار العامة
     app.add_handler(
