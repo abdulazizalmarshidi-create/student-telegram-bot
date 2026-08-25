@@ -78,6 +78,15 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_code TEXT NOT NULL,
+                sender_role TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
 
 
 def now_text():
@@ -162,6 +171,38 @@ def update_status(ticket_code, status):
         return cur.rowcount > 0
 
 
+def add_chat_message(ticket_code, sender_role, message):
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO ticket_messages (ticket_code, sender_role, message, created_at) VALUES (?, ?, ?, ?)",
+            (ticket_code.upper(), sender_role, message, now_text()),
+        )
+        conn.execute(
+            "UPDATE tickets SET updated_at = ? WHERE UPPER(ticket_code) = UPPER(?)",
+            (now_text(), ticket_code),
+        )
+
+
+def admin_ticket_keyboard(ticket_code):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("💬 محادثة", callback_data=f"admin_chat:{ticket_code}"),
+         InlineKeyboardButton("📝 ملاحظة داخلية", callback_data=f"admin_note:{ticket_code}")],
+        [InlineKeyboardButton("🛠 تحت الإجراء", callback_data=f"admin_status:in_progress:{ticket_code}"),
+         InlineKeyboardButton("⏳ بانتظار الطالب", callback_data=f"admin_status:waiting_student:{ticket_code}")],
+        [InlineKeyboardButton("✅ تم الحل", callback_data=f"admin_status:resolved:{ticket_code}"),
+         InlineKeyboardButton("🔒 إغلاق", callback_data=f"admin_status:closed:{ticket_code}")],
+    ])
+
+
+def student_ticket_keyboard(ticket_code, status):
+    rows = []
+    if status != "closed":
+        rows.append([InlineKeyboardButton("💬 الرد على الدعم", callback_data=f"student_chat:{ticket_code}")])
+    if status in ("resolved", "closed"):
+        rows.append([InlineKeyboardButton("🔄 إعادة فتح التذكرة", callback_data=f"student_reopen:{ticket_code}")])
+    rows.append([InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="back_home")])
+    return InlineKeyboardMarkup(rows)
+
 def latest_tickets(limit=10):
     with get_db() as conn:
         return conn.execute(
@@ -219,9 +260,13 @@ async def notify_admin(context: ContextTypes.DEFAULT_TYPE, ticket_code: str):
     )
 
     try:
-        await context.bot.send_message(chat_id=int(ADMIN_USER_ID), text=text)
-    except Exception:
-        pass
+        await context.bot.send_message(
+            chat_id=int(ADMIN_USER_ID),
+            text=text,
+            reply_markup=admin_ticket_keyboard(ticket_code),
+        )
+    except Exception as exc:
+        print(f"Admin notification failed: {exc}")
 
 
 # =========================
@@ -236,7 +281,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message:
         await update.message.reply_text(text, reply_markup=main_keyboard())
     elif update.callback_query:
-        await update.callback_query.edit_message_text(text, reply_markup=main_keyboard())
+        await update.callback_query.message.reply_text(text, reply_markup=main_keyboard())
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -248,7 +293,7 @@ async def main_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if query.data == "rayat":
-        await query.edit_message_text(
+        await query.message.reply_text(
             "🔐 إعادة تعيين كلمة مرور رايات\n\n"
             "لإعادة تعيين كلمة المرور، افتح الرابط التالي واختر (الدخول إلى الخدمة):\n\n"
             "https://tvtc.gov.sa/ar/Eservices/Pages/ResetPassword.aspx\n\n"
@@ -259,7 +304,7 @@ async def main_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif query.data == "contact_head":
-        await query.edit_message_text(
+        await query.message.reply_text(
             "👨‍💼 التواصل مع رئيس قسم التدرب الإلكتروني\n\n"
             f"يمكنك التواصل عبر تيليجرام:\n@{CONTACT_USERNAME}\n\n"
             "للمشكلات الفنية يفضّل فتح تذكرة دعم حتى يمكن متابعتها وتوثيقها.",
@@ -283,7 +328,7 @@ async def open_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("new_ticket", None)
     context.user_data["new_ticket"] = {}
 
-    await query.edit_message_text(
+    await query.message.reply_text(
         "🎫 فتح تذكرة دعم\n\n"
         "اختر نوع المشكلة:",
         reply_markup=ticket_type_keyboard(),
@@ -297,7 +342,7 @@ async def choose_ticket_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if query.data == "cancel_ticket":
         context.user_data.pop("new_ticket", None)
-        await query.edit_message_text(
+        await query.message.reply_text(
             "تم إلغاء فتح التذكرة.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="back_home")]
@@ -311,7 +356,7 @@ async def choose_ticket_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data["new_ticket"]["ticket_type"] = ticket_type
 
-    await query.edit_message_text(
+    await query.message.reply_text(
         f"تم اختيار: {TICKET_TYPES[ticket_type]}\n\n"
         "أرسل الآن الرقم التدريبي:"
     )
@@ -380,7 +425,7 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if query.data == "cancel_ticket":
         context.user_data.pop("new_ticket", None)
-        await query.edit_message_text(
+        await query.message.reply_text(
             "تم إلغاء التذكرة.",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🏠 القائمة الرئيسية", callback_data="back_home")]
@@ -393,7 +438,7 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = context.user_data.get("new_ticket")
     if not data:
-        await query.edit_message_text("انتهت الجلسة. افتح تذكرة جديدة من القائمة.")
+        await query.message.reply_text("انتهت الجلسة. افتح تذكرة جديدة من القائمة.")
         return ConversationHandler.END
 
     user = query.from_user
@@ -408,7 +453,7 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("new_ticket", None)
 
-    await query.edit_message_text(
+    await query.message.reply_text(
         "✅ تم إرسال التذكرة بنجاح\n\n"
         f"رقم التذكرة: {ticket_code}\n"
         "الحالة: 🆕 جديدة\n\n"
@@ -435,7 +480,7 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def track_ticket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    await query.edit_message_text(
+    await query.message.reply_text(
         "📋 متابعة تذكرة\n\n"
         "أرسل رقم التذكرة، مثال:\nET-1001"
     )
@@ -662,6 +707,189 @@ async def ticket_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# المحادثة داخل التذكرة
+# =========================
+async def ticket_action_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data.startswith("admin_chat:"):
+        if not is_admin(query.from_user.id):
+            return
+        ticket_code = data.split(":", 1)[1].upper()
+        ticket = get_ticket(ticket_code)
+        if not ticket:
+            await query.message.reply_text("❌ لم أجد التذكرة.")
+            return
+        context.user_data["admin_chat_ticket"] = ticket_code
+        context.user_data.pop("admin_note_ticket", None)
+        await query.message.reply_text(
+            f"💬 محادثة التذكرة {ticket_code}\n\n"
+            f"الطالب: {ticket['full_name']}\n"
+            "اكتب رسالتك الآن وسأرسلها للطالب داخل البوت.\n"
+            "للخروج أرسل /done"
+        )
+        return
+
+    if data.startswith("admin_note:"):
+        if not is_admin(query.from_user.id):
+            return
+        ticket_code = data.split(":", 1)[1].upper()
+        if not get_ticket(ticket_code):
+            await query.message.reply_text("❌ لم أجد التذكرة.")
+            return
+        context.user_data["admin_note_ticket"] = ticket_code
+        context.user_data.pop("admin_chat_ticket", None)
+        await query.message.reply_text(
+            f"📝 ملاحظة داخلية — {ticket_code}\n\n"
+            "اكتب الملاحظة الآن. لن تظهر للطالب.\nللإلغاء أرسل /done"
+        )
+        return
+
+    if data.startswith("admin_status:"):
+        if not is_admin(query.from_user.id):
+            return
+        _, status, ticket_code = data.split(":", 2)
+        ticket_code = ticket_code.upper()
+        ticket = get_ticket(ticket_code)
+        if not ticket or status not in STATUS_LABELS:
+            await query.message.reply_text("❌ تعذر تحديث التذكرة.")
+            return
+        update_status(ticket_code, status)
+        await query.message.reply_text(
+            f"✅ تم تحديث {ticket_code} إلى: {STATUS_LABELS[status]}",
+            reply_markup=admin_ticket_keyboard(ticket_code),
+        )
+        try:
+            await context.bot.send_message(
+                chat_id=ticket["telegram_user_id"],
+                text=f"🔔 تحديث على التذكرة {ticket_code}\n\nالحالة الجديدة: {STATUS_LABELS[status]}",
+                reply_markup=student_ticket_keyboard(ticket_code, status),
+            )
+        except Exception as exc:
+            await query.message.reply_text(f"❌ تغيرت الحالة لكن تعذر إشعار الطالب: {exc}")
+        return
+
+    if data.startswith("student_chat:"):
+        ticket_code = data.split(":", 1)[1].upper()
+        ticket = get_ticket(ticket_code)
+        if not ticket or ticket["telegram_user_id"] != query.from_user.id:
+            await query.message.reply_text("❌ هذه التذكرة غير مرتبطة بحسابك.")
+            return
+        if ticket["status"] == "closed":
+            await query.message.reply_text("🔒 التذكرة مغلقة. أعد فتحها أولاً.")
+            return
+        context.user_data["student_chat_ticket"] = ticket_code
+        await query.message.reply_text(
+            f"💬 الرد على الدعم — {ticket_code}\n\n"
+            "اكتب رسالتك الآن وسيتم إرسالها لمسؤول الدعم.\nللخروج أرسل /done"
+        )
+        return
+
+    if data.startswith("student_reopen:"):
+        ticket_code = data.split(":", 1)[1].upper()
+        ticket = get_ticket(ticket_code)
+        if not ticket or ticket["telegram_user_id"] != query.from_user.id:
+            await query.message.reply_text("❌ هذه التذكرة غير مرتبطة بحسابك.")
+            return
+        update_status(ticket_code, "in_progress")
+        await query.message.reply_text(
+            f"🔄 تم إعادة فتح التذكرة {ticket_code}.",
+            reply_markup=student_ticket_keyboard(ticket_code, "in_progress"),
+        )
+        if ADMIN_USER_ID:
+            try:
+                await context.bot.send_message(
+                    chat_id=int(ADMIN_USER_ID),
+                    text=f"🔄 أعاد الطالب فتح التذكرة {ticket_code}.",
+                    reply_markup=admin_ticket_keyboard(ticket_code),
+                )
+            except Exception as exc:
+                print(f"Reopen notify failed: {exc}")
+
+
+async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+    message = update.message.text.strip()
+    user_id = update.effective_user.id
+
+    note_ticket = context.user_data.get("admin_note_ticket")
+    if note_ticket and is_admin(user_id):
+        add_note(note_ticket, message, is_public=False)
+        context.user_data.pop("admin_note_ticket", None)
+        await update.message.reply_text(
+            f"✅ تم حفظ الملاحظة الداخلية على {note_ticket}.",
+            reply_markup=admin_ticket_keyboard(note_ticket),
+        )
+        return
+
+    admin_ticket = context.user_data.get("admin_chat_ticket")
+    if admin_ticket and is_admin(user_id):
+        ticket = get_ticket(admin_ticket)
+        if not ticket:
+            context.user_data.pop("admin_chat_ticket", None)
+            await update.message.reply_text("❌ لم أجد التذكرة.")
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=ticket["telegram_user_id"],
+                text=f"💬 رد الدعم على التذكرة {admin_ticket}\n\n{message}",
+                reply_markup=student_ticket_keyboard(admin_ticket, ticket["status"]),
+            )
+            add_chat_message(admin_ticket, "admin", message)
+            await update.message.reply_text(
+                f"✅ تم إرسال رسالتك للطالب — {admin_ticket}\n"
+                "اكتب رسالة أخرى أو /done للخروج.",
+                reply_markup=admin_ticket_keyboard(admin_ticket),
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"❌ تعذر إرسال الرسالة للطالب:\n{exc}")
+        return
+
+    student_ticket = context.user_data.get("student_chat_ticket")
+    if student_ticket:
+        ticket = get_ticket(student_ticket)
+        if not ticket or ticket["telegram_user_id"] != user_id:
+            context.user_data.pop("student_chat_ticket", None)
+            await update.message.reply_text("❌ تعذر العثور على التذكرة.")
+            return
+        if not ADMIN_USER_ID:
+            await update.message.reply_text("❌ لم يتم إعداد حساب مسؤول الدعم.")
+            return
+        try:
+            await context.bot.send_message(
+                chat_id=int(ADMIN_USER_ID),
+                text=(
+                    f"💬 رسالة من الطالب — {student_ticket}\n\n"
+                    f"الاسم: {ticket['full_name']}\n"
+                    f"الرقم التدريبي: {ticket['training_number']}\n\n"
+                    f"{message}"
+                ),
+                reply_markup=admin_ticket_keyboard(student_ticket),
+            )
+            add_chat_message(student_ticket, "student", message)
+            await update.message.reply_text(
+                f"✅ تم إرسال رسالتك للدعم — {student_ticket}\n"
+                "اكتب رسالة أخرى أو /done للخروج.",
+                reply_markup=student_ticket_keyboard(student_ticket, ticket["status"]),
+            )
+        except Exception as exc:
+            await update.message.reply_text(f"❌ تعذر إرسال رسالتك للدعم:\n{exc}")
+        return
+
+    await update.message.reply_text("اختر الخدمة من القائمة:", reply_markup=main_keyboard())
+
+
+async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop("admin_chat_ticket", None)
+    context.user_data.pop("student_chat_ticket", None)
+    context.user_data.pop("admin_note_ticket", None)
+    await update.message.reply_text("✅ تم إنهاء وضع المحادثة.", reply_markup=main_keyboard())
+
+
+# =========================
 # تشغيل البوت
 # =========================
 def main():
@@ -726,6 +954,16 @@ def main():
     # المحادثات
     app.add_handler(ticket_conversation)
     app.add_handler(track_conversation)
+
+    # أزرار إدارة التذكرة والمحادثة
+    app.add_handler(
+        CallbackQueryHandler(
+            ticket_action_buttons,
+            pattern=r"^(admin_chat:|admin_note:|admin_status:|student_chat:|student_reopen:)",
+        )
+    )
+    app.add_handler(CommandHandler("done", done_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_text_router))
 
     # الأزرار العامة
     app.add_handler(
