@@ -87,6 +87,17 @@ def init_db():
                 created_at TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ticket_drafts (
+                telegram_user_id INTEGER PRIMARY KEY,
+                ticket_step TEXT,
+                ticket_type TEXT,
+                training_number TEXT,
+                full_name TEXT,
+                description TEXT,
+                updated_at TEXT NOT NULL
+            )
+        """)
 
 
 def now_text():
@@ -122,6 +133,71 @@ def create_ticket(user_id, username, ticket_type, training_number, full_name, de
         )
         return ticket_code
 
+
+def get_draft(user_id):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM ticket_drafts WHERE telegram_user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return row
+
+
+def save_draft(user_id, step=None, ticket_type=None, training_number=None, full_name=None, description=None):
+    existing = get_draft(user_id)
+    data = {
+        "ticket_step": existing["ticket_step"] if existing else None,
+        "ticket_type": existing["ticket_type"] if existing else None,
+        "training_number": existing["training_number"] if existing else None,
+        "full_name": existing["full_name"] if existing else None,
+        "description": existing["description"] if existing else None,
+    }
+
+    if step is not None:
+        data["ticket_step"] = step
+    if ticket_type is not None:
+        data["ticket_type"] = ticket_type
+    if training_number is not None:
+        data["training_number"] = training_number
+    if full_name is not None:
+        data["full_name"] = full_name
+    if description is not None:
+        data["description"] = description
+
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO ticket_drafts (
+                telegram_user_id, ticket_step, ticket_type,
+                training_number, full_name, description, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(telegram_user_id) DO UPDATE SET
+                ticket_step = excluded.ticket_step,
+                ticket_type = excluded.ticket_type,
+                training_number = excluded.training_number,
+                full_name = excluded.full_name,
+                description = excluded.description,
+                updated_at = excluded.updated_at
+            """,
+            (
+                user_id,
+                data["ticket_step"],
+                data["ticket_type"],
+                data["training_number"],
+                data["full_name"],
+                data["description"],
+                now_text(),
+            ),
+        )
+
+
+def delete_draft(user_id):
+    with get_db() as conn:
+        conn.execute(
+            "DELETE FROM ticket_drafts WHERE telegram_user_id = ?",
+            (user_id,),
+        )
 
 def get_ticket(ticket_code):
     with get_db() as conn:
@@ -386,6 +462,8 @@ async def open_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("new_ticket", None)
     context.user_data["new_ticket"] = {}
     context.user_data["ticket_step"] = "type"
+    delete_draft(query.from_user.id)
+    save_draft(query.from_user.id, step="type")
 
     await query.message.reply_text(
         "🎫 فتح تذكرة دعم\n\n"
@@ -402,6 +480,7 @@ async def choose_ticket_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if query.data == "cancel_ticket":
         context.user_data.pop("new_ticket", None)
         context.user_data.pop("ticket_step", None)
+        delete_draft(query.from_user.id)
         await query.message.reply_text(
             "تم إلغاء فتح التذكرة.",
             reply_markup=InlineKeyboardMarkup([
@@ -414,8 +493,11 @@ async def choose_ticket_type(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if ticket_type not in TICKET_TYPES:
         return TICKET_TYPE
 
+    if "new_ticket" not in context.user_data:
+        context.user_data["new_ticket"] = {}
     context.user_data["new_ticket"]["ticket_type"] = ticket_type
     context.user_data["ticket_step"] = "training_number"
+    save_draft(query.from_user.id, step="training_number", ticket_type=ticket_type)
 
     await query.message.reply_text(
         f"تم اختيار: {TICKET_TYPES[ticket_type]}\n\n"
@@ -490,6 +572,7 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "cancel_ticket":
         context.user_data.pop("new_ticket", None)
         context.user_data.pop("ticket_step", None)
+        delete_draft(query.from_user.id)
         await query.message.reply_text(
             "تم إلغاء التذكرة.",
             reply_markup=InlineKeyboardMarkup([
@@ -502,9 +585,18 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return CONFIRM
 
     data = context.user_data.get("new_ticket")
-    if not data:
-        await query.message.reply_text("انتهت الجلسة. افتح تذكرة جديدة من القائمة.")
-        return ConversationHandler.END
+    if not data or not all(k in data for k in ("ticket_type", "training_number", "full_name", "description")):
+        draft = get_draft(query.from_user.id)
+        if draft and draft["ticket_type"] and draft["training_number"] and draft["full_name"] and draft["description"]:
+            data = {
+                "ticket_type": draft["ticket_type"],
+                "training_number": draft["training_number"],
+                "full_name": draft["full_name"],
+                "description": draft["description"],
+            }
+        else:
+            await query.message.reply_text("انتهت الجلسة. افتح تذكرة جديدة من القائمة.")
+            return ConversationHandler.END
 
     user = query.from_user
     ticket_code = create_ticket(
@@ -518,6 +610,7 @@ async def confirm_ticket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data.pop("new_ticket", None)
     context.user_data.pop("ticket_step", None)
+    delete_draft(query.from_user.id)
 
     await query.message.reply_text(
         "✅ تم فتح التذكرة بنجاح\n\n"
@@ -542,6 +635,7 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.pop("new_ticket", None)
     context.user_data.pop("ticket_step", None)
     context.user_data.pop("track_step", None)
+    delete_draft(update.effective_user.id)
     await update.message.reply_text("تم الإلغاء.", reply_markup=main_keyboard())
     return ConversationHandler.END
 
@@ -1004,6 +1098,23 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
     ticket_step = context.user_data.get("ticket_step")
     new_ticket = context.user_data.get("new_ticket")
 
+    # استعادة مسار التذكرة من قاعدة البيانات إذا فقدت الذاكرة المؤقتة
+    draft = get_draft(user_id)
+    if draft and draft["ticket_step"]:
+        ticket_step = draft["ticket_step"]
+        context.user_data["ticket_step"] = ticket_step
+        if new_ticket is None:
+            new_ticket = {}
+            context.user_data["new_ticket"] = new_ticket
+        if draft["ticket_type"]:
+            new_ticket["ticket_type"] = draft["ticket_type"]
+        if draft["training_number"]:
+            new_ticket["training_number"] = draft["training_number"]
+        if draft["full_name"]:
+            new_ticket["full_name"] = draft["full_name"]
+        if draft["description"]:
+            new_ticket["description"] = draft["description"]
+
     if ticket_step and new_ticket is not None:
         if ticket_step == "training_number":
             if len(message) < 4:
@@ -1012,6 +1123,7 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
 
             new_ticket["training_number"] = message
             context.user_data["ticket_step"] = "full_name"
+            save_draft(user_id, step="full_name", training_number=message)
             await update.message.reply_text("ممتاز. الآن أرسل الاسم الثلاثي:")
             return
 
@@ -1022,6 +1134,7 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
 
             new_ticket["full_name"] = message
             context.user_data["ticket_step"] = "description"
+            save_draft(user_id, step="description", full_name=message)
             await update.message.reply_text(
                 "📝 اكتب وصف المشكلة بالتفصيل.\n\n"
                 "مثال: لا يظهر لي المقرر في البلاك بورد منذ صباح اليوم."
@@ -1035,6 +1148,7 @@ async def conversation_text_router(update: Update, context: ContextTypes.DEFAULT
 
             new_ticket["description"] = message
             context.user_data["ticket_step"] = "confirm"
+            save_draft(user_id, step="confirm", description=message)
 
             summary = (
                 "📋 راجع بيانات التذكرة:\n\n"
@@ -1186,6 +1300,7 @@ async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop("ticket_step", None)
     context.user_data.pop("track_step", None)
     context.user_data.pop("new_ticket", None)
+    delete_draft(update.effective_user.id)
     await update.message.reply_text("✅ تم إنهاء وضع المحادثة.", reply_markup=main_keyboard())
 
 
